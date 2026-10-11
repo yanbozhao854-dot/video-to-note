@@ -32,6 +32,7 @@ def test_model_loader_uses_project_cache(
             captured.update(model_name=model_name, **kwargs)
 
     transcriber = WhisperTranscriber(tmp_path / "models")
+    monkeypatch.setattr(transcriber, "_cached_model_path", lambda name: None)
     monkeypatch.setattr(transcriber, "_download_model_files", lambda name, cancel_event=None: None)
     transcriber._load_model(FakeModel, "small", "cpu", "int8")
 

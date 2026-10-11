@@ -7,7 +7,7 @@
          （模型内容仍被 DOMPurify 剥掉 style，放行的只有本机生成的 KaTeX 输出）。
          注意 hash 与 'unsafe-inline' 并存时后者会被忽略，必须整个替换。 -->
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'">
-    <title>VideoToNo - 本地视频笔记</title>
+    <title>VideoToNo - 视频资料库</title>
     <link rel="icon" href="/favicon.ico">
     <script src="theme-bootstrap.js"></script>
     <link rel="stylesheet" href="style.css">
@@ -19,12 +19,13 @@
 </head>
 <body>
 <div class="app-shell">
-    <aside class="sidebar" aria-label="处理配置">
+    <aside id="appSettings" class="sidebar" aria-label="处理配置">
+        <button id="closeSettingsBtn" class="button secondary mobile-settings-button" type="button">返回工作区</button>
         <div class="brand">
             <img class="brand-mark" src="/icon.png" alt="" aria-hidden="true" width="40" height="40">
             <div>
                 <h1>VideoToNo <span id="appVersion" class="app-version">v1.4.5</span></h1>
-                <p>个人本地视频笔记工具</p>
+                <p>完整字幕 · AI 笔记 · 多端同步</p>
             </div>
         </div>
 
@@ -72,7 +73,7 @@
                 <span>API Key</span>
                 <input type="password" id="apiKey" autocomplete="off" placeholder="粘贴后即可使用；留空则复用本机已保存的 Key">
                 <span id="keyState" class="key-chip" role="status" aria-live="polite"></span>
-                <small>「保存到本机」只写入本机 workspace 的加密档案（绝不进浏览器存储），且只在目标接口地址一致时才会被复用。</small>
+                <small>保存到当前服务的数据目录，不写入浏览器存储，不参与资料同步；只有接口地址一致时才复用。</small>
             </label>
             <div class="llm-test-row">
                 <button id="llmTestBtn" class="button secondary" type="button">测试连接</button>
@@ -105,8 +106,13 @@
                 <div><strong>优先读取字幕</strong><small>平台字幕可用时直接用于总结</small></div>
                 <span class="pipeline-arrow" aria-hidden="true">→</span>
                 <span class="pipeline-index fallback">2</span>
-                <div><strong>音频转写兜底</strong><small>无字幕时使用本地语音识别</small></div>
+                <div><strong>按需语音识别</strong><small>无字幕时由你决定是否转写</small></div>
             </div>
+            <label class="check-field">
+                <input type="checkbox" id="allowAsr">
+                <span>无字幕时允许语音识别（本地文件也需勾选）</span>
+            </label>
+            <p class="section-note">默认只读取已有字幕。找不到字幕会停止；确认需要后勾选此项并重试。</p>
             <label class="field">
                 <span>Whisper 模型</span>
                 <select id="whisperModel">
@@ -173,8 +179,31 @@
             </div>
             <p class="mcp-note">可以跟 agent 说「先把这个视频转成带时间轴的文字稿」——它走 <code>transcribe_video</code> + <code>get_transcript</code>，<strong>本机不需要配 API Key</strong>，整理成什么样由客户端的模型决定；要一份现成成品笔记才用 <code>summarize_video</code>（需要 Key）。</p>
             <p class="mcp-note">只支持 stdio 的客户端可以跑 <code>python -m backend.mcp_server</code>，它会自动找 8000–8019 上已经开着的本服务。</p>
-            <p class="mcp-note">服务只监听 <code>127.0.0.1</code>，局域网连不进来；Key 和 B 站凭据只留在本机（Windows 用系统 DPAPI 加密）。</p>
+            <p id="mcpAccessNote" class="mcp-note">本机版只允许本机访问。服务器版需要登录；Agent 接入时请配置 Authorization: Bearer 连接口令。</p>
             <p id="mcpUnavailable" class="mcp-note" hidden>这台机器没装 <code>mcp</code> 依赖，上面的地址暂时连不通（网页端和任务本身不受影响）。装齐 <code>backend/requirements.txt</code> 里的依赖后重启即可。</p>
+        </details>
+
+        <details id="syncSection" class="config-section collapsible-section">
+            <summary>本机与服务器同步</summary>
+            <p class="section-note">同步已完成的转录、笔记和截图。各端独立运行，连接后自动同步；API Key、登录凭据和原视频保留在各自设备。</p>
+            <label class="field">
+                <span>服务器地址</span>
+                <input id="syncRemoteUrl" type="url" placeholder="https://video.example.com" autocomplete="off">
+            </label>
+            <label class="field">
+                <span>连接口令</span>
+                <input id="syncToken" type="password" placeholder="填写服务器的连接口令" autocomplete="off">
+                <small id="syncTokenHint">只保存在当前服务，不写入浏览器。</small>
+            </label>
+            <label class="check-field">
+                <input id="syncEnabled" type="checkbox">
+                <span>启用自动同步</span>
+            </label>
+            <div class="sync-actions">
+                <button id="syncSaveBtn" class="button secondary" type="button">保存连接</button>
+                <button id="syncRunBtn" class="button ghost" type="button">立即同步</button>
+            </div>
+            <p id="syncStatus" class="section-note sync-status" role="status" aria-live="polite">正在读取同步状态…</p>
         </details>
 
         <div class="sidebar-actions">
@@ -186,11 +215,13 @@
     <main class="workspace">
         <header class="workspace-header">
             <div>
-                <p class="eyebrow">LOCAL WORKSPACE</p>
+                <p class="eyebrow" id="workspaceMode">LOCAL WORKSPACE</p>
                 <h2>视频转笔记</h2>
-                <p>提交链接或本地视频，任务会先尝试字幕，缺失时再转写音频。</p>
+                <p>优先提取完整字幕并保留时间戳，无字幕时由你选择是否识别音频。</p>
             </div>
             <div class="header-actions">
+                <button id="toggleSettingsBtn" class="button ghost compact-button mobile-settings-button" type="button" aria-expanded="false" aria-controls="appSettings">设置</button>
+                <form id="logoutForm" action="/auth/logout" method="post" hidden><button class="button ghost compact-button" type="submit">退出登录</button></form>
                 <span id="serviceState" class="service-state" title="本程序在自己电脑上开的一个地址，网页界面靠它跟程序说话。跟模型的 API Key 没有关系，这里不用填任何东西。">本机服务</span>
                 <div id="themeControl" class="theme-control" role="group" aria-label="界面主题">
                     <button type="button" data-theme-option="light" aria-pressed="false" title="亮色主题">
@@ -219,11 +250,11 @@
                     <fieldset class="mode-control">
                         <legend class="sr-only">输出类型</legend>
                         <label>
-                            <input type="radio" name="outputMode" value="note" checked>
+                            <input type="radio" name="outputMode" value="note">
                             <span>生成笔记</span>
                         </label>
                         <label>
-                            <input type="radio" name="outputMode" value="transcript">
+                            <input type="radio" name="outputMode" value="transcript" checked>
                             <span>仅转录字幕</span>
                         </label>
                     </fieldset>
@@ -251,7 +282,7 @@
                 </label>
                 <label id="urlField" class="field source-input-field">
                     <span class="sr-only">视频链接</span>
-                    <input type="url" id="videoUrl" placeholder="粘贴 B 站或抖音视频链接，也支持分享文本">
+                    <input type="url" id="videoUrl" placeholder="粘贴 YouTube、B 站、抖音等视频链接">
                 </label>
                 <label id="fileField" class="file-picker" hidden>
                     <input type="file" id="localFile" accept="video/*,audio/*">
@@ -277,6 +308,10 @@
                 <div id="biliPagesList" class="bili-pages-list" role="group" aria-label="勾选要转写的分 P"></div>
             </div>
             <p id="outputModeHint" class="output-mode-hint" hidden></p>
+            <div class="task-queue-bar">
+                <span id="taskQueueStatus" role="status">最多同时处理 5 个任务</span>
+                <button id="newTaskBtn" class="button secondary compact-button" type="button">新建任务</button>
+            </div>
             <div id="biliHint" class="hint-bar" hidden>
                 <div class="hint-text">
                     <strong id="biliHintTitle">检测到 B 站链接</strong>
@@ -302,7 +337,7 @@
             </div>
             <div class="source-meta">
                 <span id="fileInfo">支持 B 站/抖音等视频链接与最大 2 GB 的本地视频</span>
-                <span>处理在本机后端完成</span>
+                <span id="processingLocation">处理在本机完成；新建任务后，之前的任务继续运行</span>
             </div>
         </section>
 
@@ -414,6 +449,7 @@
 </div>
 
 <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
-<script src="script.js?v=20261003-4"></script>
+<script src="script.js?v=20261011-1"></script>
+<script src="sync.js?v=20261011-1"></script>
 </body>
 </html>

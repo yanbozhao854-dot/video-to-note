@@ -7,7 +7,11 @@
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 FRONTEND = Path(__file__).resolve().parents[1] / "frontend"
 SCRIPT = (FRONTEND / "script.js").read_text(encoding="utf-8")
@@ -127,3 +131,75 @@ def test_builtin_provider_defaults_agree_between_front_and_back() -> None:
             f"{provider} 默认模型两边不一致：前端 {fields['defaultModel']} "
             f"≠ 后端 {model}"
         )
+
+
+def test_browser_task_switching_and_transcript_text_preservation() -> None:
+    """An old response cannot replace the new view; TXT retains subtitle symbols."""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js is needed for the browser behavior check")
+    program = r"""
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const elements = new Map();
+const noop = () => {};
+const element = (id) => {
+    if (!elements.has(id)) elements.set(id, {
+        value: id === 'sourceType' ? 'url' : '',
+        classList: { add: noop, remove: noop, toggle: noop },
+        setAttribute: noop, scrollIntoView: noop, focus: noop,
+        replaceChildren: noop, querySelector: () => ({ textContent: '' })
+    });
+    return elements.get(id);
+};
+const context = vm.createContext({
+    console, Map, Date, Set, Error, Boolean, Number, String, Promise,
+    document: { addEventListener: noop, getElementById: element, querySelectorAll: () => [] },
+    window: { clearTimeout: noop, clearInterval: noop, setTimeout: () => 1 },
+});
+vm.runInContext(fs.readFileSync(process.argv[1], 'utf8'), context);
+vm.runInContext(`
+    resetElapsedTimer = () => {};
+    setTaskActive = (active) => { isTaskActive = active; };
+    setTranscriptTaskView = () => {};
+    renderTaskAdvisory = () => {};
+    clearLogs = () => {};
+    updateProgress = () => {};
+    updateStep = () => {};
+    setTaskState = () => {};
+    toggleSourceType = () => {};
+    resetSubmitLabel = () => {};
+    showToast = () => {};
+    let completions = 0;
+    completeTask = async () => { completions += 1; };
+    readResponse = async (response) => response;
+    let resolveResponse;
+    fetchWithTimeout = () => new Promise((resolve) => { resolveResponse = resolve; });
+    currentTaskId = 'old-task';
+    isTaskActive = true;
+    globalThis.oldPoll = pollTask('old-task');
+`, context);
+vm.runInContext('createNewTaskView();', context);
+assert.equal(vm.runInContext('currentTaskId', context), null);
+assert.equal(vm.runInContext('isTaskActive', context), false);
+assert.equal(vm.runInContext('taskViewGeneration', context), 1);
+vm.runInContext(`
+    currentTaskId = 'new-task';
+    resolveResponse({ status: 'completed', result: { title: 'old video' } });
+`, context);
+(async () => {
+    await context.oldPoll;
+    assert.equal(vm.runInContext('completions', context), 0);
+    assert.equal(vm.runInContext('currentTaskId', context), 'new-task');
+    assert.equal(vm.runInContext('defaultPrefs().global.output_mode', context), 'transcript');
+    const transcript = '# 带时间戳转录\n\n[00:00-00:04] 2 * 3 = 6；#标签；`代码` > 1\n';
+    const plain = context.transcriptPlainText(transcript);
+    assert.equal(plain, transcript.split('\n\n')[1]);
+})().catch((error) => { console.error(error); process.exitCode = 1; });
+"""
+    result = subprocess.run(
+        [node, "-e", program, str(FRONTEND / "script.js")],
+        capture_output=True, text=True, encoding="utf-8", timeout=20,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

@@ -103,7 +103,8 @@ MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
 # 保留与在线视频一致的轻量工作目录；勾选“视频截图”时保留原视频。
 LARGE_UPLOAD_EXTRACT_MB = int(os.getenv("LARGE_UPLOAD_EXTRACT_MB", "300"))
 LARGE_UPLOAD_EXTRACT_BYTES = LARGE_UPLOAD_EXTRACT_MB * 1024 * 1024
-MAX_CONCURRENT_TASKS = max(1, int(os.getenv("MAX_CONCURRENT_TASKS", "1")))
+MAX_CONCURRENT_TASKS = max(1, int(os.getenv("MAX_CONCURRENT_TASKS", "5")))
+ACCESS_MODE = os.getenv("VIDEOTONOTES_MODE", "desktop").strip().lower()
 TASK_HISTORY_LIMIT = max(10, int(os.getenv("TASK_HISTORY_LIMIT", "100")))
 ALLOWED_MEDIA_SUFFIXES = {
     ".mp3",
@@ -220,7 +221,15 @@ class LocalSecurityMiddleware:
         await self.app(scope, receive, wrapped_send)
 
 
-app.add_middleware(LocalSecurityMiddleware)
+from .server_access import AccessMiddleware
+
+app.add_middleware(
+    AccessMiddleware,
+    mode=ACCESS_MODE,
+    access_token=os.getenv("VIDEOTONOTES_ACCESS_TOKEN", ""),
+    public_origin=os.getenv("VIDEOTONOTES_PUBLIC_ORIGIN", ""),
+    security_headers=SECURITY_HEADERS,
+)
 
 
 _STARTED_MONO = time.monotonic()
@@ -436,6 +445,7 @@ class SummarizeRequest(BaseModel):
     summary_style: Literal["detailed", "faithful", "concise"] = "detailed"
     reasoning_effort: Literal["auto", "off", "high", "max"] = "auto"
     prefer_subtitles: bool = True
+    allow_asr: bool = False
     include_screenshots: bool = False
     screenshot_interval: int = Field(default=30, ge=5, le=300)
     whisper_model: str = "base"
@@ -455,6 +465,7 @@ class TranscribeRequest(BaseModel):
     resume_task_id: str | None = None
     processing_mode: Literal["reuse", "restart"] = "reuse"
     prefer_subtitles: bool = True
+    allow_asr: bool = False
     whisper_model: str = "base"
     use_gpu: bool = False
     # B 站分 P 显式选择（页码从 1 起）；None/空 = 按 URL ?p=N 规则（缺省全部）
@@ -896,16 +907,9 @@ def task_status_payload(task_id: str, task: dict[str, Any]) -> dict[str, Any]:
 
 @app.get("/api/tasks")
 async def list_recent_tasks() -> dict[str, list[dict[str, Any]]]:
-    # agent 经 /api/transcribe 提交的纯转录任务不进网页端历史：它没有 result.markdown，
-    # 而且批量取原料不应该把用户的笔记历史挤出这 20 条（过滤在截断之前）。
-    # 网页端自己点的「仅转录」是用户要回看的成品，照常进历史（origin=web）。
-    def is_visible(task: dict[str, Any]) -> bool:
-        if task.get("output") != "transcript":
-            return True
-        return task.get("_origin") == "web"
-
+    # 网页、MCP 与另一端同步的产物共用资料库，均可回看和导出。
     ordered = sorted(
-        (item for item in tasks.items() if is_visible(item[1])),
+        tasks.items(),
         key=lambda item: str(item[1].get("created_at") or ""),
         reverse=True,
     )[:20]
@@ -1365,6 +1369,8 @@ async def health_check() -> dict[str, Any]:
         "llm_key_storage": secret_box.storage_backend(),
         # 前端上传上限跟随本机配置，不再自己写死一个数字
         "max_upload_mb": MAX_UPLOAD_MB,
+        "access_mode": ACCESS_MODE,
+        "max_concurrent_tasks": MAX_CONCURRENT_TASKS,
         "dependencies": {
             "yt_dlp": importlib.util.find_spec("yt_dlp") is not None,
             "faster_whisper": importlib.util.find_spec("faster_whisper") is not None,
@@ -1382,7 +1388,8 @@ async def check_app_update() -> dict[str, Any]:
     这里故意沿用系统代理的默认行为（与 CDP 那两处相反）：GitHub 恰恰是
     常需要代理才够得着的地址，代理在场就该用。
     """
-    return await asyncio.to_thread(update_check.check_summary, app.version)
+    return {"update_available": False, "current_version": app.version,
+            "message": "本定制版本请通过 GitHub 仓库更新"}
 
 
 def _tcp_reachable(host: str, port: int, timeout: float = 1.0) -> bool:
@@ -1580,6 +1587,8 @@ async def run_diagnostics(request: Request) -> dict[str, Any]:
 
 @app.post("/api/bili-login/start")
 async def bili_login_start() -> dict[str, Any]:
+    if ACCESS_MODE == "server":
+        raise HTTPException(409, "服务器请填写 B 站访问凭据；扫码登录请在本机版完成")
     return await bili_login_manager.start()
 
 
@@ -1596,6 +1605,8 @@ async def bili_login_cancel() -> dict[str, Any]:
 @app.post("/api/douyin-login/start")
 async def douyin_login_start() -> dict[str, Any]:
     """打开独立的本机浏览器 profile，用户可手动完成抖音登录/验证。"""
+    if ACCESS_MODE == "server":
+        raise HTTPException(409, "浏览器验证请在本机版完成，再同步转录和笔记")
     return await douyin_login_manager.start()
 
 
@@ -2011,6 +2022,12 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
 
         raise_if_cancel_requested(task)
         if transcript_result is None or bili_pages_to_transcribe:
+            if not request.allow_asr:
+                raise RuntimeError(
+                    "未能读取完整的平台字幕，尚未下载音频或启动语音识别。"
+                    "请检查平台登录凭据，或勾选“无字幕时允许语音识别”后重新提交。"
+                    "本地音视频也需要勾选此选项。"
+                )
             set_progress(task, 3, "准备音频", 25, "正在准备音频")
             if bili_pages_to_transcribe:
                 # 多分 P：对没有 AI 字幕的分 P 逐个下载音频并转写，再按顺序合并
@@ -2713,7 +2730,7 @@ def archive_note(
         return None
 
 
-def restore_tasks_from_workspace() -> None:
+def restore_tasks_from_workspace(task_ids: set[str] | None = None) -> None:
     """Rebuild recent task status from manifests after a service restart."""
     try:
         candidates = sorted(
@@ -2721,6 +2738,7 @@ def restore_tasks_from_workspace() -> None:
                 path
                 for path in WORKSPACE_DIR.iterdir()
                 if path.is_dir() and (path / "task.json").is_file()
+                and (task_ids is None or path.name in task_ids)
             ),
             key=lambda path: path.stat().st_mtime,
             reverse=True,
@@ -2729,6 +2747,8 @@ def restore_tasks_from_workspace() -> None:
         return
 
     for task_dir in candidates:
+        if task_dir.name in running_jobs and not running_jobs[task_dir.name].done():
+            continue
         try:
             manifest = json.loads((task_dir / "task.json").read_text(encoding="utf-8"))
         except (OSError, ValueError, TypeError):
@@ -2809,6 +2829,15 @@ def restore_tasks_from_workspace() -> None:
 
 restore_tasks_from_workspace()
 
+from .sync_service import create_sync_service
+
+sync_service = create_sync_service(
+    WORKSPACE_DIR, on_import=lambda task_id: restore_tasks_from_workspace({task_id})
+)
+app.include_router(sync_service.router)
+app.router.add_event_handler("startup", sync_service.start)
+app.router.add_event_handler("shutdown", sync_service.stop)
+
 
 # MCP 端点：SSE 传输（/mcp/sse，供 Cherry Studio 等 MCP 客户端接入）
 MCP_SSE_ENABLED = False
@@ -2853,4 +2882,5 @@ if __name__ == "__main__":
         host=os.getenv("HOST", "127.0.0.1"),
         port=port,
         reload=os.getenv("RELOAD", "false").lower() == "true",
+        proxy_headers=False,
     )

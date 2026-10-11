@@ -143,6 +143,7 @@ def _summarizer_class(generate_summary):
 def _request(**overrides):
     payload = {
         "video_url": "https://www.bilibili.com/video/BV1xx",
+        "allow_asr": True,
         "llm_config": main.LLMConfig(model_type="deepseek", api_key="test-key"),
     }
     payload.update(overrides)

@@ -23,9 +23,11 @@ import asyncio
 import os
 import warnings
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 # mcp SDK 的 FastMCP Settings 模型里 lifespan 字段带泛型前向引用，
 # pydantic-settings 每次启动都会打印 IncompleteFieldDefinitionWarning。
@@ -37,8 +39,18 @@ DEFAULT_BACKEND_URL = "http://127.0.0.1:8000"
 PORT_SCAN_RANGE = 20
 HTTP_TIMEOUT = httpx.Timeout(20.0)
 
+public_origin = os.getenv("VIDEOTONOTES_PUBLIC_ORIGIN", "").strip().rstrip("/")
+server_transport_security = None
+if os.getenv("VIDEOTONOTES_MODE") == "server" and public_origin:
+    server_transport_security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=[urlsplit(public_origin).netloc],
+        allowed_origins=[public_origin],
+    )
+
 mcp = FastMCP(
     "VideoToNo",
+    transport_security=server_transport_security,
     instructions=(
         "VideoToNo 本地视频处理服务：输入 B 站 / YouTube 等视频链接，可拿到带时间轴的转录或成品笔记。\n"
         "**先选路线**：如果你（宿主 agent）本身就有可用的模型，优先用 transcribe_video 提交 + "
@@ -73,7 +85,9 @@ class BackendClient:
         self.base_url = (base_url or DEFAULT_BACKEND_URL).rstrip("/")
         # trust_env=False：本地回环服务不走系统代理（代理会拦截 localhost 请求）
         self._client = httpx.Client(
-            timeout=HTTP_TIMEOUT, transport=transport, trust_env=False
+            timeout=HTTP_TIMEOUT, transport=transport, trust_env=False,
+            headers=({"Authorization": "Bearer " + os.environ["VIDEOTONOTES_ACCESS_TOKEN"]}
+                     if os.getenv("VIDEOTONOTES_ACCESS_TOKEN") else {}),
         )
 
     async def start_summarize(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -123,6 +137,8 @@ class BackendClient:
         try:
             response = self._client.request(method, f"{self.base_url}{path}", **kwargs)
         except httpx.HTTPError as exc:
+            if not self.base_url.startswith(("http://127.0.0.1:", "http://localhost:")):
+                raise RuntimeError("无法连接指定的 VideoToNo 服务器，请检查地址和网络") from exc
             discovered = _discover_backend_url(self.base_url)
             if discovered == self.base_url:
                 raise RuntimeError(
@@ -332,6 +348,7 @@ async def summarize_video(
     include_screenshots: bool = False,
     screenshot_interval: int = 30,
     prefer_subtitles: bool = True,
+    allow_asr: bool = False,
     processing_mode: str = "reuse",
     bilibili_sessdata: str | None = None,
     bilibili_bili_jct: str | None = None,
@@ -352,6 +369,7 @@ async def summarize_video(
         include_screenshots: 是否附带定时截图。
         screenshot_interval: 截图间隔秒数（5-300）。
         prefer_subtitles: 优先使用平台字幕（默认开启）。
+        allow_asr: 无可用字幕时是否下载音频进行本地语音识别，需用户同意，默认关闭。
         processing_mode: reuse=复用同链接已有转录 / restart=从头处理。
         bilibili_sessdata/bilibili_bili_jct/bilibili_buvid3: B 站凭据（可省略，
             省略时使用已保存凭据；未保存也能处理，只是可能读不到 AI 字幕）。
@@ -365,6 +383,7 @@ async def summarize_video(
         "summary_style": summary_style,
         "reasoning_effort": reasoning_effort,
         "prefer_subtitles": prefer_subtitles,
+        "allow_asr": allow_asr,
         "include_screenshots": include_screenshots,
         "screenshot_interval": screenshot_interval,
         "whisper_model": whisper_model,
@@ -393,6 +412,7 @@ async def transcribe_video(
     whisper_model: str = "base",
     use_gpu: bool = False,
     prefer_subtitles: bool = True,
+    allow_asr: bool = False,
     processing_mode: str = "reuse",
     bilibili_sessdata: str | None = None,
     bilibili_bili_jct: str | None = None,
@@ -410,6 +430,7 @@ async def transcribe_video(
         whisper_model: 无字幕时的本地转写模型（tiny/base/small/medium/large-v3/turbo）。
         use_gpu: 是否启用 NVIDIA GPU 转写。
         prefer_subtitles: 优先使用平台字幕（默认开启，命中时不跑转写、几乎秒回）。
+        allow_asr: 无字幕时是否下载音频并语音识别，默认关闭，先询问用户。
         processing_mode: reuse=复用同链接已有转录 / restart=从头处理。
         bilibili_sessdata/bilibili_bili_jct/bilibili_buvid3: B 站凭据（可省略，
             省略时使用本机已保存凭据；未保存也能处理，只是可能读不到 AI 字幕）。
@@ -419,6 +440,7 @@ async def transcribe_video(
         "video_url": video_url,
         "processing_mode": processing_mode,
         "prefer_subtitles": prefer_subtitles,
+        "allow_asr": allow_asr,
         "whisper_model": whisper_model,
         "use_gpu": use_gpu,
     }

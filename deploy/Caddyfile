@@ -1,0 +1,6 @@
+{$VIDEOTONOTES_DOMAIN} {
+    encode zstd gzip
+    reverse_proxy video-to-note:8000 {
+        flush_interval -1
+    }
+}

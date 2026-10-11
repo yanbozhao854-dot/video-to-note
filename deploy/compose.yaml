@@ -1,0 +1,25 @@
+services:
+  video-to-note:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      VIDEOTONOTES_MODE: server
+      VIDEOTONOTES_WORKSPACE: /data
+      WHISPER_CACHE_DIR: /data/_model_cache
+      MAX_CONCURRENT_TASKS: "5"
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - video_data:/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    init: true
+
+volumes:
+  video_data:

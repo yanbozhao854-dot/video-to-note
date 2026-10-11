@@ -18,6 +18,8 @@ from backend.transcript import TranscriptSegment
 
 OK_SCRIPT = """
 import json, sys
+sys.stdin.reconfigure(encoding="utf-8")
+sys.stdout.reconfigure(encoding="utf-8")
 job = json.loads(sys.stdin.readline())
 print(json.dumps({"event": "progress", "done": 1.0, "total": 2.0}), flush=True)
 print(json.dumps({"event": "done", "result": {

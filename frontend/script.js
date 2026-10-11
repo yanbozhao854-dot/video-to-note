@@ -133,6 +133,10 @@ let isSubmitting = false;
 let isTaskActive = false;
 let isDownloading = false;
 let isCancelling = false;
+let serverMode = false;
+let maxConcurrentTasks = 5;
+let taskViewGeneration = 0;
+let recentTasksLoading = false;
 // 结果区当前展示的是字幕稿还是笔记：标题、按钮文案与进度步数都跟着它走
 let isTranscriptTask = false;
 let elapsedTimer = null;
@@ -154,8 +158,8 @@ document.addEventListener('DOMContentLoaded', () => {
     safeStep(applyMcpAccess, '初始化 MCP 接入信息');
     loadAppVersion();
     loadRecentTasks(true);
-    // 启动自检更新：晚几秒再发，别跟首屏请求抢路；失败静默，托盘里有手动入口
-    window.setTimeout(runStartupUpdateCheck, 2500);
+    window.setInterval(() => loadRecentTasks(true), 5000);
+    // 此分支包含服务器鉴权与同步功能，更新由部署者统一进行。
     window.__videoToNoReady = true;
 });
 
@@ -187,6 +191,9 @@ async function loadAppVersion() {
             byId('appVersion').textContent = `v${data.version}${port}`;
         }
         applyUploadLimit(data.max_upload_mb);
+        maxConcurrentTasks = Number(data.max_concurrent_tasks) || 5;
+        applyAccessMode(data.access_mode === 'server');
+        renderTaskQueueStatus();
         applyMcpAccess(data.dependencies?.mcp_sse);
     } catch {
         // 保留 HTML 中的构建版本，服务短暂未就绪不影响页面使用。
@@ -199,11 +206,35 @@ function mcpSseUrl() {
 }
 
 function mcpJsonConfig() {
+    const connection = { type: 'sse', url: mcpSseUrl() };
+    if (serverMode) connection.headers = { Authorization: 'Bearer 替换为服务器连接口令' };
     return JSON.stringify(
-        { mcpServers: { "video-to-note": { type: "sse", url: mcpSseUrl() } } },
+        { mcpServers: { "video-to-note": connection } },
         null,
         2
     );
+}
+
+function applyAccessMode(isServer) {
+    serverMode = isServer;
+    document.body.classList.toggle('server-mode', serverMode);
+    byId('logoutForm').hidden = !serverMode;
+    byId('workspaceMode').textContent = serverMode ? 'SERVER WORKSPACE' : 'LOCAL WORKSPACE';
+    byId('serviceState').textContent = `${serverMode ? '服务器' : '本机服务'} · ${window.location.host}`;
+    byId('processingLocation').textContent = serverMode
+        ? '处理在服务器完成；手机关闭页面后任务仍继续运行'
+        : '处理在本机完成；新建任务后，之前的任务继续运行';
+    byId('mcpAccessNote').textContent = serverMode
+        ? '服务器已启用鉴权。Agent 需配置请求头 Authorization: Bearer 连接口令；复制的 JSON 包含待替换提示。'
+        : '本机版只允许本机访问。Windows 上保存的 Key 使用系统加密，不参与资料同步。';
+    if (serverMode) {
+        byId('manualModelBtn').closest('.manual-model-row').hidden = true;
+        byId('saveKeyBtn').textContent = '保存到服务器';
+        byId('apiKey').placeholder = '粘贴后使用；留空则复用服务器已保存的 Key';
+        byId('diagBtn').textContent = '服务自检';
+        byId('biliLoginBtn').hidden = true;
+    }
+    updateBiliHint();
 }
 
 // 只有后端明确说 mcp 没挂上才提示"连不通"；老后端没这个字段时按可用显示。
@@ -265,6 +296,17 @@ function applyUploadLimit(maxUploadMb) {
 }
 
 function bindEvents() {
+    bindListener('newTaskBtn', 'click', createNewTaskView);
+    bindListener('closeSettingsBtn', 'click', () => {
+        document.body.classList.remove('settings-open');
+        byId('toggleSettingsBtn').setAttribute('aria-expanded', 'false');
+        byId('toggleSettingsBtn').focus();
+    });
+    bindListener('toggleSettingsBtn', 'click', () => {
+        const opened = document.body.classList.toggle('settings-open');
+        byId('toggleSettingsBtn').setAttribute('aria-expanded', String(opened));
+        if (opened) byId('appSettings').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
     bindListener('resetConfigBtn', 'click', resetPreferences);
     bindListener('submitBtn', 'click', () => startSummary());
     bindListener('retryBtn', 'click', () => startSummary({ resumeCurrent: true }));
@@ -388,6 +430,27 @@ let recentTaskRows = new Map();
 let recentTasksSyncedAt = 0;
 let recentTasksElapsedTimer = null;
 
+function renderTaskQueueStatus() {
+    const statuses = Array.from(recentTaskRows.values()).map((row) => row.task.status);
+    const running = statuses.filter((status) => ['processing', 'cancelling'].includes(status)).length;
+    const queued = statuses.filter((status) => ['pending', 'queued'].includes(status)).length;
+    byId('taskQueueStatus').textContent = `运行中 ${running} / ${maxConcurrentTasks} · 排队 ${queued} · 可继续新建任务`;
+}
+
+function createNewTaskView() {
+    if (isSubmitting) return;
+    const hadActiveTask = isTaskActive;
+    resetTaskView();
+    byId('progressArea').hidden = true;
+    byId('videoUrl').value = '';
+    byId('localFile').value = '';
+    toggleSourceType();
+    resetSubmitLabel();
+    byId('sourceTitle').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    if (byId('sourceType').value === 'url') byId('videoUrl').focus();
+    if (hadActiveTask) showToast('之前的任务继续运行，可在最近任务中查看', 'info');
+}
+
 function recentTaskMetaText(task, nowSeconds) {
     const created = formatTaskDate(task.created_at);
     if (NO_ELAPSED_TASK_STATUSES.includes(task.status)) return created;
@@ -417,6 +480,8 @@ function armRecentTasksElapsedTicker() {
 }
 
 async function loadRecentTasks(silent = false) {
+    if (recentTasksLoading) return;
+    recentTasksLoading = true;
     const refreshButton = byId('refreshRecentTasksBtn');
     refreshButton.disabled = true;
     try {
@@ -426,6 +491,7 @@ async function loadRecentTasks(silent = false) {
     } catch (error) {
         if (!silent) showToast(error.message, 'error');
     } finally {
+        recentTasksLoading = false;
         refreshButton.disabled = false;
     }
 }
@@ -482,6 +548,7 @@ function renderRecentTasks(tasks) {
         list.append(row);
     });
     armRecentTasksElapsedTicker();
+    renderTaskQueueStatus();
 }
 
 async function deleteStoppedTask(taskId) {
@@ -523,13 +590,16 @@ function formatElapsedCompact(value) {
 }
 
 async function openRecentTask(taskId) {
+    if (isSubmitting) return;
+    resetTaskView();
+    const generation = taskViewGeneration;
+    currentTaskId = taskId;
     try {
         const response = await fetch(`${API_BASE}/task/${encodeURIComponent(taskId)}`, {
             cache: 'no-store'
         });
         const task = await readResponse(response, '读取任务失败');
-        resetTaskView();
-        currentTaskId = taskId;
+        if (generation !== taskViewGeneration) return;
         if (task.source_url) {
             byId('sourceType').value = 'url';
             byId('videoUrl').value = task.source_url;
@@ -545,7 +615,7 @@ async function openRecentTask(taskId) {
 
         if (task.status === 'completed') {
             await completeTask(task.result, task.elapsed_seconds, task.download_name);
-        } else if (['queued', 'processing', 'cancelling'].includes(task.status)) {
+        } else if (['pending', 'queued', 'processing', 'cancelling'].includes(task.status)) {
             setTaskActive(true);
             startElapsedTimer(task.elapsed_seconds);
             setTaskState('processing', TASK_STATUS_LABELS[task.status]);
@@ -558,6 +628,7 @@ async function openRecentTask(taskId) {
         }
         byId('progressArea').scrollIntoView({ behavior: 'smooth', block: 'start' });
     } catch (error) {
+        if (generation !== taskViewGeneration) return;
         showToast(error.message, 'error');
         loadRecentTasks(true);
     }
@@ -613,7 +684,7 @@ function defaultPrefs() {
             summary_style: 'detailed',
             reasoning_effort: 'auto',
             processing_mode: 'restart',
-            output_mode: 'note'
+            output_mode: 'transcript'
         },
         ui: { theme: 'system', mcp_hint_seen: false },
         update: { ignored_version: '' }
@@ -1365,7 +1436,7 @@ function toggleSourceType() {
 // 仅转录仍提交到 /api/summarize + output=transcript，而不是 /api/transcribe：
 // 后者是 agent 取原料的路线，任务不进网页端「最近任务」。
 function selectedOutputMode() {
-    return document.querySelector('input[name="outputMode"]:checked')?.value || 'note';
+    return document.querySelector('input[name="outputMode"]:checked')?.value || 'transcript';
 }
 
 function isTranscriptMode() {
@@ -1398,7 +1469,7 @@ function applyOutputMode() {
     if (hint) {
         hint.hidden = !transcript;
         hint.textContent = transcript
-            ? '仅转录字幕：只读平台字幕或用本地 Whisper 转写，全程不调用大模型、不需要 API Key。'
+            ? '仅转录字幕：优先读取已有字幕；只有勾选「允许语音识别」才转写音频。不需要 API Key。'
                 + '产出带时间轴的字幕稿，可直接复制或下载，之后仍能在它基础上生成笔记。'
             : '';
     }
@@ -1464,16 +1535,18 @@ function updateBiliHint(forceShow = false) {
         byId('biliHintTitle').textContent = '检测到 B 站链接';
         byId('biliHintDesc').textContent = '填写访问凭据可优先使用 AI 字幕，无需等待本地转写。';
         actions.hidden = false;
-        biliScanButton.hidden = false;
+        biliScanButton.hidden = serverMode;
         biliManualButton.hidden = false;
         hint.hidden = false;
     } else if (forceShow || (isDouyin && !biliPromptDismissed)) {
         byId('biliHintTitle').textContent = '检测到抖音链接';
-        byId('biliHintDesc').textContent = '先尝试直接解析；如果需要验证，可在本机浏览器完成后重试。';
+        byId('biliHintDesc').textContent = serverMode
+            ? '先尝试直接解析；需要浏览器验证的视频可先在 Windows 本机版处理，再同步结果。'
+            : '先尝试直接解析；如果需要验证，可在本机浏览器完成后重试。';
         actions.hidden = false;
         biliScanButton.hidden = true;
         biliManualButton.hidden = true;
-        if (douyinButton) douyinButton.hidden = false;
+        if (douyinButton) douyinButton.hidden = serverMode;
         hint.hidden = false;
     } else {
         hint.hidden = true;
@@ -1988,7 +2061,7 @@ async function startSummary(options = {}) {
     // （B 站已填凭据、抖音已验证）、已在任意会话确认过该模型下载的用户
     // （localStorage 长期记忆——前端无法预知本次是否真的会用到 Whisper，
     // 弹窗只负责首次告知下载体积，此后交任务内下载/失败提示）。
-    if (!resumeTaskId && forceRestart && !taskWillLikelyUseSubtitles(request)) {
+    if (byId('allowAsr').checked && !resumeTaskId && forceRestart && !taskWillLikelyUseSubtitles(request)) {
         const whisperOption = byId('whisperModel').selectedOptions[0];
         const status = whisperOption ? whisperOption.dataset.status : 'missing';
         const modelId = whisperOption ? whisperOption.value : '';
@@ -2093,6 +2166,9 @@ function validateAndBuildRequestBase(resumeTaskId = null) {
     }
 
     if (sourceType === 'local') {
+        if (!byId('allowAsr').checked && !resumeTaskId) {
+            return validationError('本地音视频需要语音识别，请先勾选「无字幕时允许语音识别」。');
+        }
         const file = byId('localFile').files[0];
         if (resumeTaskId) return { sourceType, file: null, videoUrl: '', modelConfig, transcriptOnly };
         if (!file) return validationError('请选择本地视频文件');
@@ -2141,6 +2217,7 @@ function buildSummarizeConfig(
     const config = {
         video_url: videoUrl,
         prefer_subtitles: true,
+        allow_asr: byId('allowAsr').checked,
         whisper_model: byId('whisperModel').value,
         use_gpu: byId('useGpu').checked,
         processing_mode: forceRestart ? 'restart' : 'reuse'
@@ -2204,6 +2281,7 @@ function schedulePoll(taskId, delay = POLL_DELAY_MS) {
 
 async function pollTask(taskId) {
     pollTimer = null;
+    const generation = taskViewGeneration;
     try {
         const response = await fetchWithTimeout(
             `${API_BASE}/task/${encodeURIComponent(taskId)}`,
@@ -2211,6 +2289,7 @@ async function pollTask(taskId) {
             POLL_TIMEOUT_MS
         );
         const task = await readResponse(response, '读取任务状态失败');
+        if (generation !== taskViewGeneration || taskId !== currentTaskId) return;
         pollErrorCount = 0;
         syncElapsedTimer(task.elapsed_seconds);
         byId('networkState').textContent = task.step === 6
@@ -2240,6 +2319,7 @@ async function pollTask(taskId) {
         }
         schedulePoll(taskId);
     } catch (error) {
+        if (generation !== taskViewGeneration || taskId !== currentTaskId) return;
         pollErrorCount += 1;
         byId('networkState').textContent = `连接异常，重试 ${pollErrorCount}/${MAX_POLL_ERRORS}`;
         byId('networkState').classList.add('network-warning');
@@ -2301,6 +2381,7 @@ function renderElapsedTime(rawSeconds) {
 }
 
 function resetTaskView() {
+    taskViewGeneration += 1;
     stopPolling();
     resetElapsedTimer();
     setTaskActive(false);
@@ -2339,10 +2420,12 @@ function setTranscriptTaskView(on) {
 }
 
 async function completeTask(result, elapsedSeconds = null, downloadName = '') {
+    const generation = taskViewGeneration;
     stopPolling();
     currentDownloadName = typeof downloadName === 'string' ? downloadName.trim() : '';
     stopElapsedTimer(elapsedSeconds ?? result?.processing_seconds ?? null);
     if (!await showResult(result)) return;
+    if (generation !== taskViewGeneration) return;
     setTaskActive(false);
     updateProgress(100);
     updateStep(7);
@@ -2377,6 +2460,7 @@ async function cancelCurrentTask() {
     if (!window.confirm('取消当前任务？已生成的音频和转录文件会保留。')) return;
 
     isCancelling = true;
+    const generation = taskViewGeneration;
     const button = byId('cancelTaskBtn');
     button.disabled = true;
     button.textContent = '正在取消';
@@ -2385,6 +2469,7 @@ async function cancelCurrentTask() {
             method: 'POST'
         });
         const data = await readResponse(response, '取消任务失败');
+        if (generation !== taskViewGeneration) return;
         if (data.status === 'cancelled') {
             markTaskCancelled(
                 '任务已取消；已生成的中间文件仍保留在工作目录',
@@ -2397,11 +2482,12 @@ async function cancelCurrentTask() {
             showToast('取消请求已发送', 'info');
         }
     } catch (error) {
+        if (generation !== taskViewGeneration) return;
         showToast(`取消失败：${error.message}`, 'error');
         button.disabled = false;
     } finally {
         isCancelling = false;
-        button.textContent = isTaskActive ? '取消请求已发送' : '取消任务';
+        if (generation === taskViewGeneration) button.textContent = isTaskActive ? '取消请求已发送' : '取消任务';
     }
 }
 
@@ -2426,6 +2512,7 @@ function setSubmitting(active, label = '开始生成') {
     byId('restartBtn').disabled = active;
     byId('regenerateBtn').disabled = active || !currentMarkdown;
     setSourceControlsDisabled(active || isTaskActive);
+    byId('newTaskBtn').disabled = active;
 }
 
 function setTaskActive(active) {
@@ -2525,6 +2612,7 @@ function createLogEntry(message, type = 'info', includeTime = false) {
 }
 
 async function showResult(result) {
+    const generation = taskViewGeneration;
     if (!result || typeof result !== 'object') {
         failTask('任务完成，但后端未返回可用的结果');
         return false;
@@ -2539,10 +2627,12 @@ async function showResult(result) {
         try {
             markdown = await fetchTranscriptText();
         } catch (error) {
+            if (generation !== taskViewGeneration) return false;
             failTask(error.message);
             return false;
         }
     }
+    if (generation !== taskViewGeneration) return false;
     if (typeof markdown !== 'string') {
         failTask('任务完成，但后端未返回可用的 Markdown 内容');
         return false;
@@ -2728,7 +2818,7 @@ async function downloadSummary() {
     const formats = {
         html: { content: convertToHtml(htmlSource), extension: '.html', mime: 'text/html' },
         json: { content: convertToJson(currentMarkdown), extension: '.json', mime: 'application/json' },
-        txt: { content: stripMarkdown(currentMarkdown), extension: '.txt', mime: 'text/plain' }
+        txt: { content: isTranscriptTask ? transcriptPlainText(currentMarkdown) : stripMarkdown(currentMarkdown), extension: '.txt', mime: 'text/plain' }
     };
     const selected = formats[format] || { content: currentMarkdown, extension: '.md', mime: 'text/markdown' };
     triggerBlobDownload(
@@ -2964,6 +3054,12 @@ function convertToJson(markdown) {
 
 function stripMarkdown(markdown) {
     return markdown.replace(/!\[[^\]]*\]\([^)]+\)/g, '').replace(/[#*`>|]/g, '').replace(/\[([^\]]+)\]\([^)]+\)/g, '$1').replace(/\n{3,}/g, '\n\n');
+}
+
+function transcriptPlainText(markdown) {
+    // Subtitle text can contain code, multiplication signs or hashtags. Only remove
+    // our own document heading; preserve every timestamp and original character.
+    return markdown.replace(/^# 带时间戳转录\r?\n(?:\r?\n)?/, '');
 }
 
 function escapeHtml(value) {

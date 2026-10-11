@@ -1325,7 +1325,7 @@ async def test_local_task_title_uses_uploaded_filename(
     await main.process_video_task(
         task_id,
         main.SummarizeRequest(
-            video_url=str(media), output="transcript", llm_config=main.LLMConfig()
+            video_url=str(media), output="transcript", allow_asr=True, llm_config=main.LLMConfig()
         ),
     )
 
@@ -1391,7 +1391,7 @@ async def test_transcript_only_task_archives_a_titled_transcript(
     await main.process_video_task(
         task_id,
         main.SummarizeRequest(
-            video_url=str(media), output="transcript", llm_config=main.LLMConfig()
+            video_url=str(media), output="transcript", allow_asr=True, llm_config=main.LLMConfig()
         ),
     )
 
@@ -1560,6 +1560,7 @@ async def test_pipeline_transcribes_missing_bilibili_page_and_merges(
     main.tasks[task_id] = main.new_task()
     request = main.SummarizeRequest(
         video_url="https://www.bilibili.com/video/BV1xx",
+        allow_asr=True,
         llm_config=main.LLMConfig(model_type="deepseek", api_key="test-key"),
     )
 
@@ -2384,8 +2385,8 @@ def test_cdp_openers_bypass_system_proxy(monkeypatch: pytest.MonkeyPatch) -> Non
         assert all(handler.proxies == {} for handler in proxy_handlers)
 
 
-def test_update_check_endpoint_reports_newer_release(monkeypatch: pytest.MonkeyPatch) -> None:
-    """启动自检的更新端点：新版本在场时给全 tag/地址/节选，交前端弹窗。"""
+def test_custom_build_ignores_upstream_release(monkeypatch: pytest.MonkeyPatch) -> None:
+    """上游更新不可替换本定制版本的鉴权和同步功能。"""
     monkeypatch.setattr(
         main.update_check,
         "fetch_latest_release",
@@ -2400,16 +2401,13 @@ def test_update_check_endpoint_reports_newer_release(monkeypatch: pytest.MonkeyP
 
     assert response.status_code == 200
     body = response.json()
-    assert body["ok"] is True
-    assert body["update_available"] is True
-    assert body["latest_version"] == "v9.9.9"
+    assert body["update_available"] is False
     assert body["current_version"] == main.app.version
-    assert body["release_url"] == "https://github.com/example/release"
-    assert body["notes"] == "修复若干"
+    assert "定制版本" in body["message"]
 
 
-def test_update_check_endpoint_survives_github_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    """GitHub 连不上时回 200 + ok=False，前端静默，不当成错误打扰用户。"""
+def test_custom_update_check_does_not_need_github(monkeypatch: pytest.MonkeyPatch) -> None:
+    """定制版本的更新提示不依赖上游可用性。"""
 
     def boom(current, timeout=5.0):
         raise OSError("网络不通")
@@ -2419,8 +2417,8 @@ def test_update_check_endpoint_survives_github_failure(monkeypatch: pytest.Monke
 
     assert response.status_code == 200
     body = response.json()
-    assert body["ok"] is False
-    assert "OSError" in body["error"]
+    assert body["update_available"] is False
+    assert body["current_version"] == main.app.version
 
 
 def test_unhandled_backend_error_comes_back_as_json(
@@ -2524,8 +2522,8 @@ async def test_transcript_only_task_finishes_before_any_llm_use(
     main.tasks.pop(task_id, None)
 
 
-def test_agent_transcript_tasks_stay_out_of_the_web_history(monkeypatch) -> None:
-    """agent 批量取原料不得挤掉用户的笔记历史；网页端自己点的「仅转录」要能回看。"""
+def test_agent_and_web_transcripts_share_the_library(monkeypatch) -> None:
+    """MCP 和网页产物均可在手机资料库回看。"""
     note_task = main.new_task(status="completed", task_id="note-task")
     note_task.update(
         created_at="2026-08-09T12:00:00+00:00",
@@ -2553,9 +2551,9 @@ def test_agent_transcript_tasks_stay_out_of_the_web_history(monkeypatch) -> None
 
     items = TestClient(main.app).get("/api/tasks").json()["tasks"]
 
-    assert [item["task_id"] for item in items] == ["web-transcript", "note-task"]
+    assert [item["task_id"] for item in items] == ["web-transcript", "agent-transcript", "note-task"]
     # 前端靠 output 打「转录」标记，并决定结果是走 result.markdown 还是现取转录
-    assert [item["output"] for item in items] == ["transcript", "note"]
+    assert [item["output"] for item in items] == ["transcript", "transcript", "note"]
     assert all("markdown" not in item for item in items)
 
 
@@ -2714,7 +2712,7 @@ def test_transcript_endpoint_errors_are_explicit(tmp_path, monkeypatch) -> None:
     assert traversal.status_code in {400, 404}
 
 
-def test_restore_keeps_transcript_task_completed_and_hidden(monkeypatch, tmp_path) -> None:
+def test_restore_keeps_transcript_task_completed_and_visible(monkeypatch, tmp_path) -> None:
     task_id = "restored-transcript"
     task_dir = tmp_path / task_id
     task_dir.mkdir()
@@ -2745,7 +2743,7 @@ def test_restore_keeps_transcript_task_completed_and_hidden(monkeypatch, tmp_pat
     assert restored["status"] == "completed"
     assert restored["output"] == "transcript"
     assert restored["result"]["segment_count"] == 1
-    assert TestClient(main.app).get("/api/tasks").json()["tasks"] == []
+    assert TestClient(main.app).get("/api/tasks").json()["tasks"][0]["task_id"] == task_id
 
 
 def test_previous_bili_pages_returns_latest_explicit_selection(

@@ -11,6 +11,9 @@ pytest-cache-files-*/
 server.stdout.log
 server.stderr.log
 .env
+deploy/.env
+deploy/.env.*
+!deploy/.env.example
 workspace/
 *.part
 *.ytdl

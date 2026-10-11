@@ -102,6 +102,13 @@ body {
 button, input, select { font: inherit; }
 button, select { cursor: pointer; }
 [hidden] { display: none !important; }
+.mobile-settings-button { display: none; }
+.sync-actions, .task-queue-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.sync-status { margin-top: 12px; white-space: pre-line; overflow-wrap: anywhere; }
+.task-queue-bar { justify-content: space-between; margin-top: 14px; color: var(--text-soft); font-size: 12px; }
+#logoutForm { margin: 0; }
+#mcpSseUrl { overflow-wrap: anywhere; }
+.server-mode #biliLoginBtn, .server-mode #biliHintScanBtn, .server-mode #douyinLoginBtn { display: none !important; }
 
 .app-shell {
     min-height: 100vh;
@@ -676,7 +683,10 @@ input[type="checkbox"] {
 
 @media (max-width: 900px) {
     .app-shell { grid-template-columns: 1fr; }
-    .sidebar { position: static; height: auto; }
+    .sidebar { position: static; height: auto; display: none; }
+    .settings-open .sidebar { display: block; }
+    .settings-open .workspace { display: none; }
+    .mobile-settings-button { display: inline-flex !important; }
     .workspace { padding-top: 28px; }
 }
 

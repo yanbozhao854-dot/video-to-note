@@ -7,6 +7,8 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$env:VIDEOTONOTES_MODE = "desktop"
+$env:MAX_CONCURRENT_TASKS = "5"
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $python = Join-Path $projectRoot ".venv\Scripts\python.exe"
 $runtimeDir = Join-Path $projectRoot ".runtime"
@@ -74,7 +76,7 @@ if ($portBusy) {
 }
 
 Set-Location -LiteralPath $projectRoot
-$arguments = @("-m", "uvicorn", "backend.main:app", "--host", $BindHost, "--port", [string]$Port)
+$arguments = @("-m", "uvicorn", "backend.main:app", "--host", $BindHost, "--port", [string]$Port, "--no-proxy-headers")
 $reloadValue = if ($env:RELOAD) { $env:RELOAD } elseif ($fileConfig.RELOAD) { $fileConfig.RELOAD } else { "false" }
 $reloadEnabled = $reloadValue -eq "true"
 
