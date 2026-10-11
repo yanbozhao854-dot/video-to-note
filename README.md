@@ -53,4 +53,4 @@ transcribe_video → wait_for_task → get_transcript 获取带时间戳原文�
 
 本机数据在 workspace/，日志在 .runtime/；服务端使用独立数据卷。资料和密钥不会提交到 GitHub 或打入 Docker 镜像。
 
-安装 backend/requirements-dev.txt 后，执行 python -m pytest；前端语法检查：node --check frontend/script.js 和 node --check frontend/sync.js。仓库包含 Windows/Linux 测试工作流。
+安装 backend/requirements-dev.txt 后，执行 python -m pytest；前端语法检查：node --check frontend/script.js 和 node --check frontend/sync.js。本机回归测试和两个独立服务之间的同步、鉴权已通过；Docker 配置已准备，Linux 容器构建仍需在装有 Docker 的环境验证。
